@@ -3,7 +3,8 @@
 
 Chỉ đọc dữ liệu từ:
   1. Log phiên công khai của Antigravity tại ~/.gemini/antigravity/brain/*/.system_generated/logs/transcript.jsonl
-  2. File JSON tuỳ chọn ~/.kindle-dashboard-quota.json (hoặc lệnh do người dùng tự khai báo trong AGY_QUOTA_CMD).
+  2. Antigravity CLI chính thức (%LOCALAPPDATA%\agy\bin\agy.exe -p "/usage" và "/credits"),
+     hoặc file JSON ~/.kindle-dashboard-quota.json / lệnh AGY_QUOTA_CMD tuỳ chọn.
 Tuyệt đối không dò cổng nội bộ hay đọc file credential/token của IDE.
 """
 from __future__ import annotations
@@ -203,7 +204,113 @@ def _normalize_quota_payload(raw: dict) -> tuple[dict, dict | None]:
     return quotas, credits_obj
 
 
-def collect_quotas() -> tuple[dict, dict | None]:
+def _find_agy_cli() -> Path | None:
+    """Tìm file thực thi agy.exe chính thức (tránh agy.cmd mở cửa sổ IDE GUI)."""
+    custom = os.environ.get("AGY_CLI_BIN", "").strip()
+    candidate = (
+        Path(custom)
+        if custom
+        else Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "agy" / "bin" / "agy.exe"
+    )
+    if candidate.is_file() and candidate.name.lower() == "agy.exe":
+        return candidate
+    return None
+
+
+def _run_agy_slash(agy_exe: Path, slash_cmd: str) -> dict | None:
+    """Gọi lệnh slash không tương tác của agy.exe, không bật cửa sổ console và bỏ qua hooks."""
+    try:
+        proc = subprocess.run(
+            [str(agy_exe), "--settings", "{}", "-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            return None
+        parsed = json.loads(proc.stdout.strip())
+        if isinstance(parsed, dict) and parsed.get("status") == "SUCCESS" and isinstance(parsed.get("command"), dict):
+            data = parsed["command"].get("data")
+            return data if isinstance(data, dict) else None
+    except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
+        pass
+    return None
+
+
+def _map_agy_bucket_key(bucket_id: str, window: str, group_name: str) -> str | None:
+    bid = bucket_id.lower()
+    win = window.lower()
+    gname = group_name.lower()
+    if bid == "gemini-5h" or ("gemini" in gname and win == "5h"):
+        return "five_hour"
+    if bid == "gemini-weekly" or ("gemini" in gname and win == "weekly"):
+        return "gemini"
+    if bid == "3p-5h" or (("claude" in gname or "gpt" in gname) and win == "5h"):
+        return "seven_day"
+    if bid == "3p-weekly" or (("claude" in gname or "gpt" in gname) and win == "weekly"):
+        return "claude"
+    return None
+
+
+def collect_agy_cli_quotas(now: datetime | None = None) -> tuple[dict, dict | None]:
+    """Lấy quota 5 giờ / tuần và credits từ agy.exe -p '/usage' & '/credits'."""
+    agy_exe = _find_agy_cli()
+    if not agy_exe:
+        return {}, None
+
+    quotas: dict[str, dict] = {}
+    credits_obj: dict | None = None
+
+    usage_data = _run_agy_slash(agy_exe, "/usage")
+    groups = usage_data.get("groups") if isinstance(usage_data, dict) else None
+    if isinstance(groups, list):
+        for g in groups:
+            if not isinstance(g, dict):
+                continue
+            gname = str(g.get("name") or "")
+            buckets = g.get("buckets")
+            if not isinstance(buckets, list):
+                continue
+            for b in buckets:
+                if not isinstance(b, dict):
+                    continue
+                key = _map_agy_bucket_key(str(b.get("id") or ""), str(b.get("window") or ""), gname)
+                rem_frac = b.get("remaining_fraction")
+                if key and isinstance(rem_frac, (int, float)):
+                    clamped = max(0.0, min(1.0, float(rem_frac)))
+                    quotas[key] = {
+                        "utilization": round((1.0 - clamped) * 100.0, 1),
+                        "resets_at": b.get("reset_time") or None,
+                    }
+
+    credits_data = _run_agy_slash(agy_exe, "/credits")
+    if isinstance(credits_data, dict) and isinstance(credits_data.get("remaining_credits"), (int, float)):
+        credits_obj = {
+            "remaining": int(round(credits_data["remaining_credits"])),
+            "limit": None,
+        }
+
+    if quotas:
+        cache_payload = {
+            "source": "agy_cli",
+            "fetched_at": (now or datetime.now(TZ)).isoformat(),
+            "quotas": quotas,
+            "credits": credits_obj,
+        }
+        try:
+            QUOTA_FILE.write_text(json.dumps(cache_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+    return quotas, credits_obj
+
+
+def collect_quotas(now: datetime | None = None) -> tuple[dict, dict | None]:
+    now = now or datetime.now(TZ)
     raw: dict = {}
     cmd = os.environ.get("AGY_QUOTA_CMD", "").strip()
     if cmd:
@@ -215,7 +322,9 @@ def collect_quotas() -> tuple[dict, dict | None]:
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                stdin=subprocess.DEVNULL,
                 timeout=15,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 parsed = json.loads(proc.stdout)
@@ -223,16 +332,30 @@ def collect_quotas() -> tuple[dict, dict | None]:
                     raw = parsed
         except (subprocess.SubprocessError, json.JSONDecodeError, OSError):
             pass
+        if raw:
+            return _normalize_quota_payload(raw)
 
-    if not raw and QUOTA_FILE.is_file():
+    cli_quotas, cli_credits = collect_agy_cli_quotas(now=now)
+    if cli_quotas:
+        return cli_quotas, cli_credits
+
+    if QUOTA_FILE.is_file():
         try:
             parsed = json.loads(QUOTA_FILE.read_text(encoding="utf-8"))
             if isinstance(parsed, dict):
-                raw = parsed
+                if parsed.get("source") == "agy_cli":
+                    ft = _parse_iso(parsed.get("fetched_at"))
+                    if ft is not None and (now - ft).total_seconds() <= 6 * 3600:
+                        raw = parsed
+                else:
+                    raw = parsed
         except (OSError, json.JSONDecodeError):
             pass
 
-    return _normalize_quota_payload(raw)
+    quotas, credits_obj = _normalize_quota_payload(raw)
+    if credits_obj is None and cli_credits is not None:
+        credits_obj = cli_credits
+    return quotas, credits_obj
 
 
 def save_manual_quota(items: list[str], reset_hours: float | None) -> None:
@@ -278,7 +401,7 @@ def save_manual_quota(items: list[str], reset_hours: float | None) -> None:
 
 def build_payload(redact_titles: bool = False) -> dict:
     now = datetime.now(TZ)
-    quotas, credits_obj = collect_quotas()
+    quotas, credits_obj = collect_quotas(now=now)
     activity = collect_brain_activity(now=now, redact_titles=redact_titles)
     return {
         "fetched_at": now.isoformat(),

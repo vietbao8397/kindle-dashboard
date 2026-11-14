@@ -255,6 +255,13 @@ def _extract_quotas(agy: dict) -> dict[str, dict]:
     return out
 
 
+def _rem_pct(v: dict | None) -> float | None:
+    u = v.get("utilization") if isinstance(v, dict) else None
+    if not isinstance(u, (int, float)):
+        return None
+    return max(0.0, min(100.0, 100.0 - float(u)))
+
+
 def _reset_label(iso: str | None, now: datetime) -> str:
     if not iso:
         return ""
@@ -322,16 +329,55 @@ def _draw_activity_row(d: ScaledDraw, y: int, activity: dict) -> int:
     return y + pill_h + 10
 
 
+def _draw_quota_cell(
+    d: ScaledDraw,
+    x0: float,
+    y: int,
+    col_w: float,
+    label: str,
+    v: dict,
+    now: datetime,
+    show_reset: bool,
+    f_name,
+    f_pre,
+    f_pct,
+    f_rst,
+    bh: int = 12,
+    bar_offset: int = 27,
+) -> None:
+    rem = _rem_pct(v)
+    d.text((x0, y), label, font=f_name, fill=DARK)
+    if rem is None:
+        pct_txt = "--"
+        d.text((x0 + col_w - d.textlength(pct_txt, font=f_pct), y - 3), pct_txt, font=f_pct, fill=BLACK)
+    else:
+        pct_txt = f"{round(rem)}%"
+        pw_num = d.textlength(pct_txt, font=f_pct)
+        pre_txt = "còn "
+        pw_pre = d.textlength(pre_txt, font=f_pre)
+        d.text((x0 + col_w - pw_num, y - 3), pct_txt, font=f_pct, fill=BLACK)
+        d.text((x0 + col_w - pw_num - pw_pre, y + 2), pre_txt, font=f_pre, fill=MID)
+    by = y + bar_offset
+    d.rounded_rectangle([x0, by, x0 + col_w, by + bh], radius=bh // 2, outline=BLACK, width=2)
+    if rem is not None and rem > 0:
+        fill_w = max(bh, col_w * rem / 100.0)
+        d.rounded_rectangle([x0, by, x0 + fill_w, by + bh], radius=bh // 2, fill=BLACK)
+    if show_reset:
+        rst = _reset_label(v.get("resets_at"), now)
+        if rst:
+            d.text((x0, by + bh + 3), fit(d, rst, f_rst, col_w), font=f_rst, fill=MID)
+
+
 def draw_antigravity(d: ScaledDraw, y: int, agy: dict, now: datetime) -> int:
-    """Dải Antigravity gọn trên bố cục Lịch: Quota (Gemini/Claude/GPT + Credits) + Trạng thái phiên."""
+    """Dải Antigravity gọn trên bố cục Lịch: Quota (% còn lại 5h/Tuần + Credits) + Trạng thái phiên."""
     draw_antigravity_logo(d, MARGIN, y, 24)
     f_lab = font("Bold", 24)
     d.text((MARGIN + 34, y + 12), "ANTIGRAVITY", font=f_lab, fill=BLACK, anchor="lm")
 
-    # Dòng metadata bên phải: Credits + giờ cập nhật
+    # Dòng metadata bên phải: Credits (>0) + giờ cập nhật
     credits_obj = agy.get("credits") if isinstance(agy.get("credits"), dict) else None
     cred_txt = ""
-    if credits_obj and isinstance(credits_obj.get("remaining"), (int, float)):
+    if credits_obj and isinstance(credits_obj.get("remaining"), (int, float)) and credits_obj["remaining"] > 0:
         cred_txt = f"Credits: {int(round(credits_obj['remaining']))}"
 
     time_txt, stale = "", False
@@ -364,36 +410,44 @@ def draw_antigravity(d: ScaledDraw, y: int, agy: dict, now: datetime) -> int:
     activity = agy.get("activity") if isinstance(agy.get("activity"), dict) else None
 
     if quotas:
-        if any(k in quotas for k in ("gemini", "claude", "gpt")):
-            cols = [("gemini", "Gemini"), ("claude", "Claude"), ("gpt", "GPT")]
-            gap = 28
+        if "five_hour" in quotas and ("seven_day" in quotas or "gemini" in quotas):
+            rows = [
+                [("five_hour", "Gemini · 5 giờ"), ("seven_day", "Claude/GPT · 5 giờ")],
+                [("gemini", "Gemini · Tuần"), ("claude", "Claude/GPT · Tuần")],
+            ]
+            gap = 36
+            col_w = (W - 2 * MARGIN - gap) / 2
+            f_name, f_pre, f_pct, f_rst = font("Medium", 21), font("Regular", 18), font("Bold", 24), font("Regular", 17)
+            for row in rows:
+                row_has_reset = any(_reset_label((quotas.get(k) or {}).get("resets_at"), now) for k, _ in row)
+                for i, (key, label) in enumerate(row):
+                    _draw_quota_cell(
+                        d, MARGIN + i * (col_w + gap), y, col_w, label,
+                        quotas.get(key) or {}, now, row_has_reset,
+                        f_name, f_pre, f_pct, f_rst, bh=12, bar_offset=27,
+                    )
+                y += 27 + 12 + (23 if row_has_reset else 10)
+            y += 4
         else:
-            cols = [("five_hour", "Phiên hiện tại"), ("seven_day", "Tuần này")]
-            gap = 40
+            if any(k in quotas for k in ("gemini", "claude", "gpt")):
+                cols = [("gemini", "Gemini"), ("claude", "Claude"), ("gpt", "GPT")]
+                gap = 28
+            else:
+                cols = [("five_hour", "Phiên hiện tại"), ("seven_day", "Tuần này")]
+                gap = 40
 
-        col_w = (W - 2 * MARGIN - gap * (len(cols) - 1)) / len(cols)
-        has_any_reset = any(_reset_label((quotas.get(k) or {}).get("resets_at"), now) for k, _ in cols)
-        f_name, f_pct, f_rst = font("Medium", 22), font("Bold", 26), font("Regular", 18)
+            col_w = (W - 2 * MARGIN - gap * (len(cols) - 1)) / len(cols)
+            has_any_reset = any(_reset_label((quotas.get(k) or {}).get("resets_at"), now) for k, _ in cols)
+            f_name, f_pre, f_pct, f_rst = font("Medium", 22), font("Regular", 18), font("Bold", 26), font("Regular", 18)
 
-        for i, (key, label) in enumerate(cols):
-            x0 = MARGIN + i * (col_w + gap)
-            v = quotas.get(key) or {}
-            pct = v.get("utilization")
-            pct_txt = "--" if pct is None else f"{round(pct)}%"
-            d.text((x0, y), label, font=f_name, fill=DARK)
-            d.text((x0 + col_w - d.textlength(pct_txt, font=f_pct), y - 3), pct_txt, font=f_pct, fill=BLACK)
-            by = y + 32
-            bh = 13
-            d.rounded_rectangle([x0, by, x0 + col_w, by + bh], radius=6, outline=BLACK, width=2)
-            if pct:
-                fill_w = max(bh, col_w * min(float(pct), 100.0) / 100.0)
-                d.rounded_rectangle([x0, by, x0 + fill_w, by + bh], radius=6, fill=BLACK)
-            if has_any_reset:
-                rst = _reset_label(v.get("resets_at"), now)
-                if rst:
-                    d.text((x0, by + bh + 4), fit(d, rst, f_rst, col_w), font=f_rst, fill=MID)
+            for i, (key, label) in enumerate(cols):
+                _draw_quota_cell(
+                    d, MARGIN + i * (col_w + gap), y, col_w, label,
+                    quotas.get(key) or {}, now, has_any_reset,
+                    f_name, f_pre, f_pct, f_rst, bh=13, bar_offset=32,
+                )
 
-        y += 32 + 13 + (32 if has_any_reset else 12)
+            y += 32 + 13 + (32 if has_any_reset else 12)
 
     if activity:
         y = _draw_activity_row(d, y, activity)
@@ -418,23 +472,24 @@ def _pct_text(d, x, y, pct, fp):
     return x
 
 
-def _status(pct):
-    return ("Thoải mái" if pct < 50 else "Vừa phải" if pct < 80
-            else "Sắp chạm giới hạn" if pct < 100 else "Đã hết, chờ đặt lại")
+def _status(rem):
+    return ("Thoải mái" if rem > 50 else "Vừa phải" if rem > 20
+            else "Sắp hết quota" if rem > 0 else "Đã hết, chờ đặt lại")
 
 
 def _big_quota_block(d: ScaledDraw, y: int, name: str, v: dict, now: datetime, span: timedelta) -> int:
-    pct = v.get("utilization")
+    rem = _rem_pct(v)
     left, reset_at = _remaining(v.get("resets_at"), now)
     elapsed = min(max(1 - (reset_at - now) / span, 0), 1) if reset_at else None
-    fp = font("Bold", 190)
-    x_end = _pct_text(d, MARGIN - 6, y + 78, pct, fp)
+    fp = font("Bold", 190 if (rem is None or round(rem) < 100) else 156)
+    x_end = _pct_text(d, MARGIN - 6, y + 78, rem, fp)
     rx = x_end + 30
-    d.text((rx, y + 12), name.upper(), font=font("Bold", 32), fill=BLACK)
-    if pct is not None:
-        status = _status(pct)
-        fs = font("SemiBold", 30)
-        if pct >= 80:
+    fn = font("Bold", 30)
+    d.text((rx, y + 12), fit(d, name.upper(), fn, W - MARGIN - rx), font=fn, fill=BLACK)
+    if rem is not None:
+        status = _status(rem)
+        fs = font("SemiBold", 28)
+        if rem <= 20:
             sw = d.textlength(status, font=fs)
             d.rounded_rectangle([rx, y + 56, rx + sw + 30, y + 100], radius=22, fill=BLACK)
             d.text((rx + 15, y + 78), status, font=fs, fill=WHITE, anchor="lm")
@@ -453,8 +508,8 @@ def _big_quota_block(d: ScaledDraw, y: int, name: str, v: dict, now: datetime, s
     for q in (0.25, 0.5, 0.75):
         qx = bx0 + bar_w * q
         d.line([(qx, y + 11), (qx, y + bh - 11)], fill=LIGHT, width=3)
-    if pct:
-        fw = max(bh, bar_w * min(float(pct), 100.0) / 100.0)
+    if rem is not None and rem > 0:
+        fw = max(bh, bar_w * rem / 100.0)
         d.rounded_rectangle([bx0, y, bx0 + fw, y + bh], radius=bh // 2, fill=BLACK)
     ty = y + bh + 6
     if elapsed is not None:
@@ -470,20 +525,22 @@ def _big_quota_block(d: ScaledDraw, y: int, name: str, v: dict, now: datetime, s
 
 def _mini_quota_col(d: ScaledDraw, x0: float, y: int, w: float, name: str, v: dict, now: datetime) -> None:
     v = v or {}
-    pct = v.get("utilization")
-    d.text((x0, y), name, font=font("SemiBold", 28), fill=DARK)
-    fp = font("Bold", 40)
-    pct_txt = "--" if pct is None else f"{round(pct)}%"
-    d.text((x0 + w - d.textlength(pct_txt, font=fp), y - 6), pct_txt, font=fp, fill=BLACK)
-    by, bh = y + 46, 20
+    rem = _rem_pct(v)
+    fn = font("SemiBold", 22)
+    fp = font("Bold", 32)
+    pct_txt = "--" if rem is None else f"{round(rem)}%"
+    pw = d.textlength(pct_txt, font=fp)
+    d.text((x0, y), fit(d, name, fn, max(40, w - pw - 8)), font=fn, fill=DARK)
+    d.text((x0 + w - pw, y - 5), pct_txt, font=fp, fill=BLACK)
+    by, bh = y + 38, 18
     d.rounded_rectangle([x0, by, x0 + w, by + bh], radius=bh // 2, outline=BLACK, width=3)
-    if pct:
-        fw = max(bh, w * min(float(pct), 100.0) / 100.0)
+    if rem is not None and rem > 0:
+        fw = max(bh, w * rem / 100.0)
         d.rounded_rectangle([x0, by, x0 + fw, by + bh], radius=bh // 2, fill=BLACK)
     rst = _reset_label(v.get("resets_at"), now)
     if rst:
-        fc = font("Regular", 21)
-        d.text((x0, by + bh + 8), fit(d, rst, fc, w), font=fc, fill=MID)
+        fc = font("Regular", 19)
+        d.text((x0, by + bh + 7), fit(d, rst, fc, w), font=fc, fill=MID)
 
 
 def draw_antigravity_big(d: ScaledDraw, y: int, agy: dict | None, now: datetime) -> int:
@@ -530,18 +587,30 @@ def draw_antigravity_big(d: ScaledDraw, y: int, agy: dict | None, now: datetime)
     activity = agy.get("activity") if isinstance(agy.get("activity"), dict) else None
 
     if quotas:
-        primary_key = next((k for k in ("claude", "gemini", "seven_day", "five_hour", "gpt") if k in quotas), None)
-        names = {"gemini": "Gemini", "claude": "Claude", "gpt": "GPT", "five_hour": "Phiên 5 giờ", "seven_day": "Tuần này"}
+        if "five_hour" in quotas and ("seven_day" in quotas or "gemini" in quotas):
+            names = {
+                "five_hour": "Gemini · 5 giờ",
+                "gemini": "Gemini · Tuần",
+                "seven_day": "Claude/GPT · 5 giờ",
+                "claude": "Claude/GPT · Tuần",
+                "gpt": "GPT",
+            }
+        else:
+            names = {"gemini": "Gemini", "claude": "Claude", "gpt": "GPT", "five_hour": "Phiên 5 giờ", "seven_day": "Tuần này"}
+        order = ("five_hour", "gemini", "seven_day", "claude", "gpt")
+        primary_key = max(quotas.keys(), key=lambda k: quotas[k].get("utilization", -1))
         if primary_key:
-            span = timedelta(hours=5) if primary_key == "five_hour" else timedelta(days=7)
-            y = _big_quota_block(d, y, names[primary_key], quotas[primary_key], now, span)
-            others = [(k, names[k]) for k in ("gemini", "claude", "gpt", "five_hour") if k != primary_key and k in quotas]
+            span = timedelta(hours=5) if primary_key in ("five_hour", "seven_day") and "five_hour" in quotas and "gemini" in quotas else (
+                timedelta(hours=5) if primary_key == "five_hour" else timedelta(days=7)
+            )
+            y = _big_quota_block(d, y, names.get(primary_key, primary_key), quotas[primary_key], now, span)
+            others = [(k, names.get(k, k)) for k in order if k != primary_key and k in quotas][:3]
             if others:
-                gap = 36
+                gap = 28 if len(others) >= 3 else 36
                 col_w = (W - 2 * MARGIN - gap * (len(others) - 1)) / len(others)
                 for i, (k, label) in enumerate(others):
                     _mini_quota_col(d, MARGIN + i * (col_w + gap), y, col_w, label, quotas[k], now)
-                y += 102
+                y += 96
     elif activity:
         # Không có quota nhưng có activity -> hiện nổi bật số bước & phiên hôm nay
         big_txt = f"{int(activity.get('today_steps') or 0)}"
@@ -551,7 +620,7 @@ def draw_antigravity_big(d: ScaledDraw, y: int, agy: dict | None, now: datetime)
         d.text((MARGIN + bw + 24, y + 66), f"{int(activity.get('today_sessions') or 0)} phiên · {int(activity.get('week_steps') or 0)} bước/7 ngày", font=font("Medium", 26), fill=DARK)
         y += 130
 
-    if credits_obj and isinstance(credits_obj.get("remaining"), (int, float)):
+    if credits_obj and isinstance(credits_obj.get("remaining"), (int, float)) and credits_obj["remaining"] > 0:
         d.text((MARGIN, y), f"AI Credits còn lại: {int(round(credits_obj['remaining']))}", font=font("SemiBold", 24), fill=DARK)
         y += 36
 

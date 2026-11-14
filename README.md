@@ -159,9 +159,9 @@ Hầu hết tuỳ chỉnh nằm trong file `.github/workflows/update.yml` trên 
 
 ## Phần 5 (tuỳ chọn): Đồng bộ Antigravity trên Windows
 
-Bộ đồng bộ trong **`windows/`** giúp dashboard hiển thị cả **trạng thái phiên Agent gần nhất** (đọc tự động từ thư mục log chính thức `~/.gemini/antigravity/brain/`) lẫn **% Quota (Gemini / Claude / GPT) + AI Credits**.
+Bộ đồng bộ trong **`windows/`** giúp dashboard hiển thị cả **trạng thái phiên Agent gần nhất** (đọc tự động từ thư mục log chính thức `~/.gemini/antigravity/brain/`) lẫn **% Quota còn lại (Gemini · 5 giờ / Tuần, Claude/GPT · 5 giờ / Tuần) + AI Credits**.
 
-1. **Lưu `DATA_URL` vào máy Windows** (mở PowerShell, thay link của bạn vào):
+1. **Lưu `DATA_URL` vào máy Windows** (nếu chưa chạy `windows\connect_google.ps1`, mở PowerShell và thay link của bạn vào):
    ```powershell
    Set-Content "$HOME\.kindle-dashboard-url" "https://script.google.com/macros/s/YOUR_ID/exec?token=YOUR_TOKEN" -NoNewline
    ```
@@ -169,13 +169,12 @@ Bộ đồng bộ trong **`windows/`** giúp dashboard hiển thị cả **trạ
    ```powershell
    python windows\antigravity_sync.py --dry-run
    ```
-   *(Nếu muốn ẩn tên yêu cầu phiên Agent, chỉ hiện mã phiên, thêm cờ `--redact-titles`.)*
-3. **Cập nhật số liệu % Quota & AI Credits** (tuỳ chọn):
-   Do Antigravity chưa công bố REST API độc lập cho quota, bạn có thể nhập nhanh số liệu xem từ lệnh `/usage` hoặc `/credits` trong CLI `agy` vào file `~/.kindle-dashboard-quota.json` bằng 1 lệnh:
+   *(Script tự động gọi Antigravity CLI chính thức `%LOCALAPPDATA%\agy\bin\agy.exe -p "/usage"` và `"/credits"` ở chế độ JSON không tốn token. Nếu muốn ẩn tên yêu cầu phiên Agent, chỉ hiện mã phiên, thêm cờ `--redact-titles`.)*
+3. **Ghi đè % Quota thủ công hoặc nguồn ngoài** (tuỳ chọn — chỉ cần khi máy không cài `agy.exe`):
    ```powershell
    python windows\antigravity_sync.py --set-quota gemini=32 claude=58 gpt=15 credits=420 --reset-hours 5
    ```
-   *(Hoặc đặt biến môi trường `AGY_QUOTA_CMD` trỏ tới lệnh/script xuất JSON chuẩn nếu bạn dùng công cụ ngoài).*
+   *(Hoặc đặt biến môi trường `AGY_QUOTA_CMD` trỏ tới lệnh/script xuất JSON chuẩn, hay `AGY_CLI_BIN` nếu `agy.exe` nằm ở thư mục khác).*
 4. **Cài lịch chạy ngầm mỗi 10 phút** qua Windows Task Scheduler:
    ```powershell
    powershell -ExecutionPolicy Bypass -File windows\install_task.ps1
