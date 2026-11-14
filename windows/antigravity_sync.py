@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -418,11 +419,73 @@ def read_data_url() -> str:
     return url
 
 
+def _find_gh_cli() -> str | None:
+    found = shutil.which("gh")
+    if found:
+        return found
+    candidates = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "GitHub CLI" / "gh.exe",
+    ]
+    for c in candidates:
+        if str(c) and c.is_file():
+            return str(c)
+    return None
+
+
+def _detect_github_repo() -> str | None:
+    env_repo = os.environ.get("DASH_GH_REPO", "").strip()
+    if env_repo:
+        return env_repo
+    git_cfg = Path(__file__).resolve().parent.parent / ".git" / "config"
+    if git_cfg.is_file():
+        try:
+            txt = git_cfg.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?(?:\s|$)", txt)
+            if m:
+                return m.group(1).strip()
+        except OSError:
+            pass
+    return None
+
+
+def trigger_github_workflow() -> str:
+    """Kích hoạt ngay workflow update.yml trên GitHub để không bị trễ bởi GitHub cron."""
+    if os.environ.get("DASH_TRIGGER_GH", "1").strip().lower() in ("0", "false", "no"):
+        return "skip"
+    gh_exe = _find_gh_cli()
+    if not gh_exe:
+        return "no_gh"
+    repo_slug = _detect_github_repo()
+    if not repo_slug:
+        return "no_repo"
+    try:
+        proc = subprocess.run(
+            [gh_exe, "workflow", "run", "update.yml", "-R", repo_slug],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if proc.returncode == 0:
+            return "ok"
+        err = (proc.stderr or proc.stdout or "").strip().splitlines()
+        short_err = err[0][:80] if err else f"rc={proc.returncode}"
+        return f"err({short_err})"
+    except subprocess.SubprocessError as exc:
+        return f"err({type(exc).__name__})"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Đồng bộ trạng thái Antigravity lên Kindle Dashboard")
     ap.add_argument("--dry-run", action="store_true", help="In JSON ra màn hình, không gửi lên Apps Script")
     ap.add_argument("--write-local", help="Ghi JSON ra file cục bộ để kiểm thử render.py")
     ap.add_argument("--redact-titles", action="store_true", help="Ẩn tên yêu cầu người dùng, chỉ hiện mã phiên")
+    ap.add_argument("--no-trigger-gh", action="store_true", help="Không gọi gh workflow run sau khi gửi Apps Script")
     ap.add_argument(
         "--set-quota",
         nargs="+",
@@ -466,12 +529,13 @@ def main() -> int:
         r.raise_for_status()
         body = r.text.strip()
         if '"ok":true' in body or '"ok": true' in body:
+            gh_state = "skip" if args.no_trigger_gh else trigger_github_workflow()
             act = payload["activity"]
             _log(
                 f"OK sessions={act['today_sessions']} steps={act['today_steps']} "
-                f"quotas={list(payload['quotas'].keys())}"
+                f"quotas={list(payload['quotas'].keys())} gh_dispatch={gh_state}"
             )
-            print("Đã đồng bộ Antigravity lên Apps Script.")
+            print(f"Đã đồng bộ Antigravity lên Apps Script (gh_dispatch={gh_state}).")
             return 0
         _log(f"Apps Script phản hồi lạ: {body[:160]}")
         print(f"Apps Script phản hồi lạ: {body[:160]}", file=sys.stderr)
