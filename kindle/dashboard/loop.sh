@@ -8,11 +8,16 @@ LOG="$DIR/log.txt"
 IMG="/tmp/dashboard.png"
 CYCLE=0
 . "$DIR/config.sh"
+cd /
+ORIG_GOV=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null)
+[ -n "$ORIG_GOV" ] || ORIG_GOV="ondemand"
+WEBREADER_STOPPED=0
 
 log() {
-  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"
+  [ -d "$DIR" ] || return 0
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG" 2>/dev/null || return 0
   # giữ log nhỏ
-  if [ "$(wc -c < "$LOG")" -gt 200000 ]; then tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
+  if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 200000 ]; then tail -n 300 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"; fi
 }
 
 wifi() { lipc-set-prop com.lab126.cmd wirelessEnable "$1" 2>/dev/null; }
@@ -24,13 +29,23 @@ battery() {
 }
 
 init() {
-  log "=== Khởi động dashboard ==="
+  log "=== Khởi động dashboard (gov=${ORIG_GOV}) ==="
   # Tắt giao diện Kindle để icon trạng thái không vẽ đè lên ảnh và cho phép ngủ sâu.
-  /etc/init.d/framework stop 2>/dev/null || {
-    stop framework >/dev/null 2>&1 || initctl stop framework >/dev/null 2>&1
-    stop lab126_gui >/dev/null 2>&1
-  }
-  initctl stop webreader >/dev/null 2>&1
+  # Chặn TERM tạm thời (giống koreader.sh) để script không bị dừng giữa lúc tắt Upstart UI.
+  trap "" TERM
+  if [ -d /etc/upstart ]; then
+    case "$(initctl status webreader 2>/dev/null)" in
+      *start/running*)
+        initctl stop webreader >/dev/null 2>&1 && WEBREADER_STOPPED=1
+        ;;
+    esac
+    # Chỉ dừng lab126_gui; dừng/bật thêm framework riêng lẻ gây deadlock Upstart lúc bật lại (~90%)
+    initctl stop lab126_gui >/dev/null 2>&1 || stop lab126_gui >/dev/null 2>&1
+    sleep 2
+  else
+    /etc/init.d/framework stop 2>/dev/null
+  fi
+  trap - TERM
   { echo powersave > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; } 2>/dev/null
   lipc-set-prop com.lab126.powerd preventScreenSaver 1 2>/dev/null
 }
@@ -128,15 +143,28 @@ go_to_sleep() {
 
 exit_dashboard() {
   log "Bấm nút nguồn → thoát dashboard, bật lại giao diện Kindle"
-  echo 0 > "$RTC/wakealarm" 2>/dev/null
+  # Phục hồi CPU governor ngay đầu tiên để giao diện Kindle không bị nghẽn timeout (~90%)
+  { echo "${ORIG_GOV:-ondemand}" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; } 2>/dev/null
+  [ -n "$RTC" ] && echo 0 > "$RTC/wakealarm" 2>/dev/null
   eips -c
-  eips 1 1 "Dang thoat dashboard, cho chut..."
+  eips 1 1 "Dang mo lai giao dien Kindle..."
   lipc-set-prop com.lab126.powerd preventScreenSaver 0 2>/dev/null
   wifi 1
-  /etc/init.d/framework start 2>/dev/null || {
-    start lab126_gui >/dev/null 2>&1
-    start framework >/dev/null 2>&1 || initctl start framework >/dev/null 2>&1
-  }
+
+  if [ "${EXIT_REBOOT:-0}" = 1 ]; then
+    log "EXIT_REBOOT=1 → khởi động lại thiết bị"
+    sync
+    /sbin/reboot
+    exit 0
+  fi
+
+  cd /
+  if [ -d /etc/upstart ]; then
+    [ "${WEBREADER_STOPPED:-0}" = 1 ] && initctl start webreader >/dev/null 2>&1
+    initctl start lab126_gui >/dev/null 2>&1 || start lab126_gui >/dev/null 2>&1
+  else
+    /etc/init.d/framework start 2>/dev/null
+  fi
   exit 0
 }
 

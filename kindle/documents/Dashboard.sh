@@ -21,7 +21,7 @@ case "$IMAGE_URL" in
     exit 1 ;;
 esac
 
-if pgrep -f "$DIR/loop.sh" >/dev/null 2>&1; then
+if pgrep -f "dashboard-loop.sh" >/dev/null 2>&1 || pgrep -f "$DIR/loop.sh" >/dev/null 2>&1; then
   echo "Dashboard dang chay roi."
   exit 0
 fi
@@ -29,10 +29,16 @@ fi
 echo "Dang bat Antigravity Dashboard..."
 echo "Thoat: bam nut nguon 1 lan."
 sleep 3
+# chép sang /var/tmp và chạy từ / để tránh giữ khóa file trên /mnt/us
+cp -pf "$DIR/loop.sh" /var/tmp/dashboard-loop.sh && chmod 755 /var/tmp/dashboard-loop.sh
+LOOP_BIN="/var/tmp/dashboard-loop.sh"
+[ -f "$LOOP_BIN" ] || LOOP_BIN="$DIR/loop.sh"
+export DASH_DIR="$DIR"
+cd /
 # chạy nền, tách khỏi tiến trình giao diện để không bị dừng theo
 if command -v setsid >/dev/null 2>&1; then
-  setsid sh "$DIR/loop.sh" >/dev/null 2>&1 < /dev/null &
+  setsid sh "$LOOP_BIN" >/dev/null 2>&1 < /dev/null &
 else
-  nohup sh "$DIR/loop.sh" >/dev/null 2>&1 < /dev/null &
+  nohup sh "$LOOP_BIN" >/dev/null 2>&1 < /dev/null &
 fi
 exit 0
