@@ -1,0 +1,7 @@
+_site/
+client_secret*.json
+__pycache__/
+*.pyc
+preview*.png
+*.log
+.kindle-dashboard-*

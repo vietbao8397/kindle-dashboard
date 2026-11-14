@@ -1,0 +1,70 @@
+name: Cập nhật dashboard Kindle
+
+on:
+  schedule:
+    # Giờ trong cron là UTC (giờ VN = UTC + 7). GitHub có thể chạy trễ.
+    # 8:00–23:45 giờ VN: 15 phút/lần (01:00–16:45 UTC)
+    - cron: "*/15 1-16 * * *"
+    # 0:00 và 4:00 giờ VN: 4 tiếng/lần (17:00, 21:00 UTC)
+    - cron: "0 17,21 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pillow requests
+      - name: Tải font Inter (nếu repo chưa có)
+        continue-on-error: true
+        run: |
+          if [ ! -f fonts/Inter-Regular.otf ]; then
+            mkdir -p fonts
+            curl -fsSL --retry 3 --retry-delay 5 -o /tmp/inter.zip https://github.com/rsms/inter/releases/download/v4.0/Inter-4.0.zip
+            unzip -j -o /tmp/inter.zip 'extras/otf/Inter-Regular.otf' 'extras/otf/Inter-Medium.otf' 'extras/otf/Inter-SemiBold.otf' 'extras/otf/Inter-Bold.otf' -d fonts
+          fi
+          ls -la fonts
+      - name: Vẽ dashboard
+        env:
+          DATA_URL: ${{ secrets.DATA_URL }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          GOOGLE_REFRESH_TOKEN: ${{ secrets.GOOGLE_REFRESH_TOKEN }}
+          DASH_SKIP_CALENDARS: ${{ vars.DASH_SKIP_CALENDARS }}
+          DASH_LAYOUT: ${{ vars.DASH_LAYOUT || 'lich' }}   # lich (mặc định) / antigravity
+          # Toạ độ thành phố cho thời tiết — mặc định TP.HCM
+          DASH_LAT: "10.7769"
+          DASH_LON: "106.7009"
+          # Tiêu đề bố cục antigravity (tuỳ chọn)
+          DASH_TITLE: "Antigravity"
+          # Cỡ chữ: 1.12 cân đối cho màn hình 1072x1448 (Paperwhite 3)
+          DASH_SCALE: "1.12"
+          SECRET_PATH: ${{ secrets.SECRET_PATH }}
+        run: |
+          python render.py --out "_site/${SECRET_PATH:-img}/dashboard.png"
+          touch _site/index.html
+          # ảnh mẫu (dữ liệu giả) để minh hoạ, ai cũng xem được
+          python render.py --sample sample.json --now "2026-11-14T10:30" --out _site/preview.png
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
