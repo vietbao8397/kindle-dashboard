@@ -91,17 +91,9 @@
         "utilization": 8,
         "resets_at": "2026-11-14T13:00:00+07:00"
       },
-      "seven_day": {
-        "utilization": 14,
-        "resets_at": "2026-11-14T13:00:00+07:00"
-      },
       "gemini": {
-        "utilization": 28,
-        "resets_at": "2026-11-19T18:00:00+07:00"
-      },
-      "claude": {
-        "utilization": 64,
-        "resets_at": "2026-11-16T09:00:00+07:00"
+        "utilization": 26,
+        "resets_at": "2026-11-20T23:44:21Z"
       }
     },
     "credits": {

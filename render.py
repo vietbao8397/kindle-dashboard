@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -248,11 +249,55 @@ def draw_antigravity_logo(d: ScaledDraw, x: float, y: float, size: float) -> Non
 def _extract_quotas(agy: dict) -> dict[str, dict]:
     raw_q = agy.get("quotas") if isinstance(agy.get("quotas"), dict) else {}
     out: dict[str, dict] = {}
-    for k in ("gemini", "claude", "gpt", "five_hour", "seven_day"):
+    for k in ("five_hour", "gemini"):
         v = raw_q.get(k) if isinstance(raw_q.get(k), dict) else agy.get(k)
         if isinstance(v, dict) and isinstance(v.get("utilization"), (int, float)):
             out[k] = v
     return out
+
+
+def compute_daily_pacer(gemini_quota: dict | None, now: datetime) -> dict | None:
+    """Tính ngân sách ngày cuốn chiếu theo thang 100% (= 14,2857% giới hạn tuần)."""
+    if not isinstance(gemini_quota, dict):
+        return None
+    u = gemini_quota.get("utilization")
+    if not isinstance(u, (int, float)):
+        return None
+    used = max(0.0, min(100.0, float(u)))
+    rem_week = max(0.0, 100.0 - used)
+
+    reset_day_short = ""
+    iso = gemini_quota.get("resets_at")
+    day_index: int | None = None
+    if isinstance(iso, str) and iso.strip():
+        try:
+            reset_dt = datetime.fromisoformat(iso.strip().replace("Z", "+00:00")).astimezone(TZ)
+            reset_day_short = THU_NGAN[reset_dt.weekday()]
+            days_diff = (reset_dt.date() - now.date()).days
+            if reset_dt.hour < 12:
+                day_index = min(7, max(1, 8 - days_diff))
+            else:
+                day_index = min(7, max(1, 7 - days_diff))
+        except ValueError:
+            day_index = None
+
+    if day_index is None:
+        day_index = now.weekday() + 1
+
+    today_raw = 100.0 * day_index - 7.0 * used
+    today_pct = int(round(today_raw))
+    if day_index >= 7:
+        tomorrow_pct = 100
+    else:
+        tomorrow_raw = min(100.0 * (day_index + 1) - 7.0 * used, 7.0 * rem_week)
+        tomorrow_pct = int(round(tomorrow_raw))
+
+    return {
+        "day_index": day_index,
+        "today_pct": today_pct,
+        "tomorrow_pct": tomorrow_pct,
+        "reset_day_short": reset_day_short,
+    }
 
 
 def _rem_pct(v: dict | None) -> float | None:
@@ -368,94 +413,309 @@ def _draw_quota_cell(
             d.text((x0, by + bh + 3), fit(d, rst, f_rst, col_w), font=f_rst, fill=MID)
 
 
+def _ss_thick_arc(
+    sd: ImageDraw.ImageDraw,
+    cx: float,
+    cy: float,
+    r: float,
+    deg_start: float,
+    deg_sweep: float,
+    thickness: float,
+    fill: int,
+    steps: int = 72,
+) -> None:
+    """Vẽ cung tròn dày có đầu bo tròn (round cap) trên canvas supersampled."""
+    if abs(deg_sweep) < 0.5:
+        return
+    n = max(6, int(round(steps * abs(deg_sweep) / 144.0)))
+    pts: list[tuple[float, float]] = []
+    for i in range(n + 1):
+        rad = math.radians(deg_start + deg_sweep * (i / n))
+        pts.append((cx + r * math.cos(rad), cy + r * math.sin(rad)))
+    hw = thickness / 2.0
+    for px, py in pts:
+        sd.ellipse([px - hw, py - hw, px + hw, py + hw], fill=fill)
+
+
+def _ss_round_line(
+    sd: ImageDraw.ImageDraw,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    width: float,
+    fill: int,
+) -> None:
+    """Vẽ đoạn thẳng có hai đầu bo tròn mượt."""
+    sd.line([(x0, y0), (x1, y1)], fill=fill, width=max(1, round(width)))
+    hw = width / 2.0
+    sd.ellipse([x0 - hw, y0 - hw, x0 + hw, y0 + hw], fill=fill)
+    sd.ellipse([x1 - hw, y1 - hw, x1 + hw, y1 + hw], fill=fill)
+
+
+def _paste_d1_max_graphics(
+    d: ScaledDraw,
+    x0: int,
+    y0: int,
+    box_w: int,
+    box_h: int,
+    rem_5h: float | None,
+    rem_wk: float | None,
+    today_pct: int | None,
+) -> None:
+    """Vẽ đồ hoạ vector 3× supersampled (2 cung bán nguyệt tách rời + đường chạy người que & cờ)."""
+    ss = 3.0 * SCALE
+    pw = max(1, round(box_w * SCALE))
+    ph = max(1, round(box_h * SCALE))
+    sw = max(1, round(box_w * ss))
+    sh = max(1, round(box_h * ss))
+    canvas = Image.new("L", (sw, sh), WHITE)
+    sd = ImageDraw.Draw(canvas)
+
+    def S(v: float) -> float:
+        return v * ss
+
+    # ---- 1. Cột trái: 2 cung bán nguyệt tách rời, KHÔNG gạch giữa
+    cx = 108.0
+    r = 74.0
+    cy_up = 80.0
+    cy_dn = 86.0
+
+    # Vòm trên (5 GIỜ): từ -162° quét +144° qua đỉnh tới -18°
+    _ss_thick_arc(sd, S(cx), S(cy_up), S(r), -162.0, 144.0, S(11.5), LIGHT)
+    if rem_5h is not None and rem_5h > 0:
+        _ss_thick_arc(sd, S(cx), S(cy_up), S(r), -162.0, 144.0 * max(0.03, rem_5h / 100.0), S(12.5), BLACK)
+
+    # Vòm dưới (TUẦN): từ +162° quét -144° qua đáy tới +18°
+    _ss_thick_arc(sd, S(cx), S(cy_dn), S(r), 162.0, -144.0, S(11.5), LIGHT)
+    if rem_wk is not None and rem_wk > 0:
+        _ss_thick_arc(sd, S(cx), S(cy_dn), S(r), 162.0, -144.0 * max(0.03, rem_wk / 100.0), S(12.5), BLACK)
+
+    # Vạch ngăn dọc mảnh giữa cột vòng cung và cột hành trình ngày
+    sd.line([(S(222), S(10)), (S(222), S(box_h - 10))], fill=PALE, width=max(1, round(S(2))))
+
+    # ---- 2. Cột phải (hàng dưới): Đường chạy + Lá cờ + Người que
+    if today_pct is not None:
+        tx0 = 258.0
+        tx_flag = 668.0
+        tx_end = float(box_w - 6)
+        ty = 144.0
+
+        # Nền đường hôm nay (tx0 -> tx_flag) + đường đứt nét vùng đệm ngày mai (tx_flag -> tx_end)
+        _ss_round_line(sd, S(tx0), S(ty), S(tx_flag), S(ty), S(6.5), LIGHT)
+        dash_x = tx_flag + 10.0
+        while dash_x < tx_end:
+            seg_end = min(tx_end, dash_x + 8.0)
+            _ss_round_line(sd, S(dash_x), S(ty), S(seg_end), S(ty), S(4.2), MID)
+            dash_x += 16.0
+
+        # Vạch xuất phát 0%
+        _ss_round_line(sd, S(tx0), S(ty - 12), S(tx0), S(ty + 12), S(4.5), BLACK)
+
+        if today_pct >= 0:
+            # Chưa vượt cờ: người que đi bộ thư thả phía trước lá cờ
+            walk_ratio = max(0.0, min(1.0, (100.0 - float(today_pct)) / 100.0))
+            walk_x = tx0 + walk_ratio * (tx_flag - tx0)
+            if walk_x > tx0 + 2.0:
+                _ss_round_line(sd, S(tx0), S(ty), S(walk_x), S(ty), S(10.0), BLACK)
+
+            # Cờ đen đặc tại đích 100% hôm nay
+            _ss_round_line(sd, S(tx_flag), S(ty - 66), S(tx_flag), S(ty + 13), S(4.5), BLACK)
+            sd.polygon(
+                [(S(tx_flag), S(ty - 66)), (S(tx_flag + 46), S(ty - 52)), (S(tx_flag), S(ty - 38))],
+                fill=BLACK,
+            )
+
+            # Người que đi bộ trước cờ (giữ khoảng cách an toàn không đè cột cờ)
+            sx = max(tx0 + 18.0, min(tx_flag - 28.0, walk_x))
+            hr = 9.0
+            sd.ellipse(
+                [S(sx - hr), S(ty - 66), S(sx + hr), S(ty - 66 + 2 * hr)],
+                outline=BLACK,
+                width=max(2, round(S(4.4))),
+            )
+            _ss_round_line(sd, S(sx), S(ty - 47), S(sx), S(ty - 22), S(4.6), BLACK)
+            _ss_round_line(sd, S(sx), S(ty - 40), S(sx - 14), S(ty - 28), S(4.0), BLACK)
+            _ss_round_line(sd, S(sx), S(ty - 40), S(sx + 14), S(ty - 31), S(4.0), BLACK)
+            _ss_round_line(sd, S(sx), S(ty - 22), S(sx - 11), S(ty - 4), S(4.6), BLACK)
+            _ss_round_line(sd, S(sx), S(ty - 22), S(sx + 11), S(ty - 4), S(4.6), BLACK)
+        else:
+            # Đã xài lố âm: vệt đen phủ hết hôm nay + khối lẹm qua cờ + người que chạy lao về trước
+            _ss_round_line(sd, S(tx0), S(ty), S(tx_flag), S(ty), S(10.0), BLACK)
+            over_ratio = min(1.0, abs(float(today_pct)) / 100.0)
+            max_over_span = max(36.0, tx_end - tx_flag - 34.0)
+            over_w = max(28.0, over_ratio * max_over_span)
+            over_x = min(tx_end - 26.0, tx_flag + over_w)
+            sd.rectangle([S(tx_flag), S(ty - 8), S(over_x), S(ty + 8)], fill=BLACK)
+
+            # Cờ rỗng quay ngược báo hiệu mốc đích đã bị vượt qua
+            _ss_round_line(sd, S(tx_flag), S(ty - 66), S(tx_flag), S(ty + 13), S(4.5), BLACK)
+            pts_flag = [(S(tx_flag), S(ty - 66)), (S(tx_flag - 42), S(ty - 52)), (S(tx_flag), S(ty - 38))]
+            sd.polygon(pts_flag, fill=WHITE)
+            _ss_round_line(sd, S(tx_flag), S(ty - 66), S(tx_flag - 42), S(ty - 52), S(3.6), BLACK)
+            _ss_round_line(sd, S(tx_flag - 42), S(ty - 52), S(tx_flag), S(ty - 38), S(3.6), BLACK)
+
+            # Vạch tốc độ + người que đầu đặc lao về trước bên phải cờ
+            sx = min(tx_end - 18.0, max(tx_flag + 56.0, over_x + 16.0))
+            sl1_x0 = max(tx_flag + 10.0, sx - 42.0)
+            sl2_x0 = max(tx_flag + 8.0, sx - 46.0)
+            if sx - 27.0 > sl1_x0 + 4.0:
+                _ss_round_line(sd, S(sl1_x0), S(ty - 48), S(sx - 27.0), S(ty - 48), S(3.2), BLACK)
+            if sx - 30.0 > sl2_x0 + 4.0:
+                _ss_round_line(sd, S(sl2_x0), S(ty - 35), S(sx - 30.0), S(ty - 35), S(3.2), BLACK)
+
+            hr = 9.0
+            sd.ellipse([S(sx - hr + 2), S(ty - 68), S(sx + hr + 2), S(ty - 68 + 2 * hr)], fill=BLACK)
+            _ss_round_line(sd, S(sx), S(ty - 49), S(sx - 11), S(ty - 23), S(4.8), BLACK)
+            _ss_round_line(sd, S(sx - 4), S(ty - 42), S(sx + 16), S(ty - 48), S(4.0), BLACK)
+            _ss_round_line(sd, S(sx - 4), S(ty - 41), S(sx - 23), S(ty - 33), S(4.0), BLACK)
+            _ss_round_line(sd, S(sx - 11), S(ty - 23), S(sx + 9), S(ty - 4), S(4.6), BLACK)
+            _ss_round_line(sd, S(sx - 11), S(ty - 23), S(sx - 29), S(ty - 6), S(4.6), BLACK)
+
+    down = canvas.resize((pw, ph), Image.Resampling.LANCZOS)
+    d._img.paste(down, (round(x0 * SCALE), round(y0 * SCALE)))
+
+
 def draw_antigravity(d: ScaledDraw, y: int, agy: dict, now: datetime) -> int:
-    """Dải Antigravity gọn trên bố cục Lịch: Quota (% còn lại 5h/Tuần + Credits) + Trạng thái phiên."""
-    draw_antigravity_logo(d, MARGIN, y, 24)
-    f_lab = font("Bold", 24)
-    d.text((MARGIN + 34, y + 12), "ANTIGRAVITY", font=f_lab, fill=BLACK, anchor="lm")
+    """Bố cục D1-Max cho màn 6-inch E-Ink: Header gộp trạng thái + 2 vòm tách rời + Ngân sách ngày 100%."""
+    draw_antigravity_logo(d, MARGIN, y, 28)
+    f_lab = font("Bold", 25)
+    d.text((MARGIN + 38, y + 14), "ANTIGRAVITY", font=f_lab, fill=BLACK, anchor="lm")
 
-    # Dòng metadata bên phải: Credits (>0) + giờ cập nhật
-    credits_obj = agy.get("credits") if isinstance(agy.get("credits"), dict) else None
-    cred_txt = ""
-    if credits_obj and isinstance(credits_obj.get("remaining"), (int, float)) and credits_obj["remaining"] > 0:
-        cred_txt = f"Credits: {int(round(credits_obj['remaining']))}"
-
-    time_txt, stale = "", False
+    stale = False
+    stale_txt = ""
     fetched = agy.get("fetched_at")
     if fetched:
         try:
             ft = datetime.fromisoformat(str(fetched).replace("Z", "+00:00")).astimezone(TZ)
             stale = (now - ft).total_seconds() > 7200
-            time_txt = f"số liệu cũ · {ft:%H:%M %d/%m}" if stale else f"cập nhật {ft:%H:%M}"
+            if stale:
+                stale_txt = f"SỐ LIỆU CŨ · {ft:%H:%M %d/%m}"
         except ValueError:
             pass
 
-    f_cred, f_time = font("SemiBold", 21), font("Regular", 20)
-    rx = W - MARGIN
-    if time_txt:
-        tw = d.textlength(time_txt, font=f_time)
-        d.text((rx - tw, y + 12), time_txt, font=f_time, fill=DARK if stale else MID, anchor="lm")
-        rx -= tw
-    if cred_txt and time_txt:
-        sep = " · "
-        sw = d.textlength(sep, font=f_time)
-        d.text((rx - sw, y + 12), sep, font=f_time, fill=MID, anchor="lm")
-        rx -= sw
-    if cred_txt:
-        cw = d.textlength(cred_txt, font=f_cred)
-        d.text((rx - cw, y + 12), cred_txt, font=f_cred, fill=BLACK, anchor="lm")
-
-    y += 36
-    quotas = _extract_quotas(agy)
     activity = agy.get("activity") if isinstance(agy.get("activity"), dict) else None
+    rx = W - MARGIN
+    if stale and stale_txt:
+        f_st = font("SemiBold", 20)
+        d.text((rx - d.textlength(stale_txt, font=f_st), y + 14), stale_txt, font=f_st, fill=DARK, anchor="lm")
+    elif activity:
+        latest = activity.get("latest") if isinstance(activity.get("latest"), dict) else {}
+        status = str(latest.get("status") or "DONE").upper()
+        active_count = int(activity.get("active_count") or 0)
+        today_sess = int(activity.get("today_sessions") or 0)
 
-    if quotas:
-        if "five_hour" in quotas and ("seven_day" in quotas or "gemini" in quotas):
-            rows = [
-                [("five_hour", "Gemini · 5 giờ"), ("seven_day", "Claude/GPT · 5 giờ")],
-                [("gemini", "Gemini · Tuần"), ("claude", "Claude/GPT · Tuần")],
-            ]
-            gap = 36
-            col_w = (W - 2 * MARGIN - gap) / 2
-            f_name, f_pre, f_pct, f_rst = font("Medium", 21), font("Regular", 18), font("Bold", 24), font("Regular", 17)
-            for row in rows:
-                row_has_reset = any(_reset_label((quotas.get(k) or {}).get("resets_at"), now) for k, _ in row)
-                for i, (key, label) in enumerate(row):
-                    _draw_quota_cell(
-                        d, MARGIN + i * (col_w + gap), y, col_w, label,
-                        quotas.get(key) or {}, now, row_has_reset,
-                        f_name, f_pre, f_pct, f_rst, bh=12, bar_offset=27,
-                    )
-                y += 27 + 12 + (23 if row_has_reset else 10)
-            y += 4
+        if status == "ERROR":
+            pill_txt, fill_bg, fg, bw = "LỖI", None, BLACK, 3
+        elif status == "RUNNING" or active_count > 0:
+            pill_txt, fill_bg, fg, bw = "ĐANG CHẠY", BLACK, WHITE, 0
         else:
-            if any(k in quotas for k in ("gemini", "claude", "gpt")):
-                cols = [("gemini", "Gemini"), ("claude", "Claude"), ("gpt", "GPT")]
-                gap = 28
-            else:
-                cols = [("five_hour", "Phiên hiện tại"), ("seven_day", "Tuần này")]
-                gap = 40
+            pill_txt, fill_bg, fg, bw = "SẴN SÀNG", None, BLACK, 2
 
-            col_w = (W - 2 * MARGIN - gap * (len(cols) - 1)) / len(cols)
-            has_any_reset = any(_reset_label((quotas.get(k) or {}).get("resets_at"), now) for k, _ in cols)
-            f_name, f_pre, f_pct, f_rst = font("Medium", 22), font("Regular", 18), font("Bold", 26), font("Regular", 18)
+        f_act = font("SemiBold", 21)
+        if status == "RUNNING" or active_count > 0:
+            raw_lbl = str(latest.get("label") or "").strip()
+            info_txt = fit(d, raw_lbl, f_act, 210) if raw_lbl else f"{today_sess} phiên"
+        else:
+            info_txt = f"{today_sess} phiên"
 
-            for i, (key, label) in enumerate(cols):
-                _draw_quota_cell(
-                    d, MARGIN + i * (col_w + gap), y, col_w, label,
-                    quotas.get(key) or {}, now, has_any_reset,
-                    f_name, f_pre, f_pct, f_rst, bh=13, bar_offset=32,
-                )
+        iw = d.textlength(info_txt, font=f_act)
+        d.text((rx - iw, y + 14), info_txt, font=f_act, fill=BLACK if (status == "RUNNING" or active_count > 0) else DARK, anchor="lm")
+        rx -= iw + 12
 
-            y += 32 + 13 + (32 if has_any_reset else 12)
+        fpill = font("Bold", 17)
+        pill_w = round(d.textlength(pill_txt, font=fpill) + 24)
+        pill_h = 28
+        px0 = rx - pill_w
+        if fill_bg is not None:
+            d.rounded_rectangle([px0, y, rx, y + pill_h], radius=14, fill=fill_bg)
+        else:
+            d.rounded_rectangle([px0, y, rx, y + pill_h], radius=14, outline=BLACK, width=bw)
+        d.text((px0 + pill_w / 2, y + pill_h / 2), pill_txt, font=fpill, fill=fg, anchor="mm")
 
-    if activity:
-        y = _draw_activity_row(d, y, activity)
-    elif not quotas:
-        d.text((MARGIN, y), "Chưa có số liệu Antigravity từ Windows PC.", font=font("Regular", 22), fill=MID)
-        y += 34
+    y += 38
+    quotas = _extract_quotas(agy)
+    if not quotas:
+        if not activity:
+            d.text((MARGIN, y + 4), "Chưa có số liệu Antigravity từ Windows PC.", font=font("Regular", 24), fill=MID)
+            return y + 42
+        return y + 6
 
-    return y
+    q_5h = quotas.get("five_hour")
+    q_wk = quotas.get("gemini")
+    rem_5h = _rem_pct(q_5h)
+    rem_wk = _rem_pct(q_wk)
+    pacer = compute_daily_pacer(q_wk, now)
+
+    box_w = W - 2 * MARGIN
+    box_h = 166
+    today_pct = pacer["today_pct"] if pacer else None
+    tomorrow_pct = pacer["tomorrow_pct"] if pacer else None
+    day_index = pacer["day_index"] if pacer else None
+    reset_short = pacer["reset_day_short"] if pacer else ""
+
+    _paste_d1_max_graphics(d, MARGIN, y, box_w, box_h, rem_5h, rem_wk, today_pct)
+
+    # Chữ trong lòng 2 vòm cung bên trái
+    cx_abs = MARGIN + 108
+    f_arc_num = font("Bold", 35)
+    f_arc_lbl = font("Bold", 17)
+
+    txt_5h = "--" if rem_5h is None else f"{round(rem_5h)}%"
+    d.text((cx_abs, y + 42), txt_5h, font=f_arc_num, fill=BLACK, anchor="mm")
+    d.text((cx_abs, y + 67), "5 GIỜ", font=f_arc_lbl, fill=DARK, anchor="mm")
+
+    txt_wk = "--" if rem_wk is None else f"{round(rem_wk)}%"
+    wk_lbl = f"TUẦN · {reset_short}" if reset_short else "TUẦN"
+    d.text((cx_abs, y + 103), txt_wk, font=f_arc_num, fill=BLACK, anchor="mm")
+    d.text((cx_abs, y + 128), wk_lbl, font=f_arc_lbl, fill=DARK, anchor="mm")
+
+    # Cặp số cỡ đại NAY / MAI + nhãn mốc ngày bên phải
+    rx0 = MARGIN + 254
+    rx1 = W - MARGIN
+    if pacer is not None:
+        f_klbl = font("Bold", 22)
+        f_kbig = font("Bold", 50)
+        f_kneg = font("Bold", 44)
+        kpi_cy = y + 36
+
+        # Cụm NAY (trái)
+        d.text((rx0, kpi_cy + 4), "NAY", font=f_klbl, fill=BLACK if today_pct < 0 else DARK, anchor="lm")
+        nay_w = d.textlength("NAY", font=f_klbl)
+        if today_pct < 0:
+            neg_s = f"−{abs(today_pct)}%"
+            bw = max(134, round(d.textlength(neg_s, font=f_kneg) + 30))
+            bx0 = rx0 + nay_w + 12
+            d.rounded_rectangle([bx0, y + 8, bx0 + bw, y + 64], radius=12, fill=BLACK)
+            d.text((bx0 + bw / 2, y + 36), neg_s, font=f_kneg, fill=WHITE, anchor="mm")
+        else:
+            pos_s = f"{today_pct}%"
+            d.text((rx0 + nay_w + 12, kpi_cy), pos_s, font=f_kbig, fill=BLACK, anchor="lm")
+
+        # Cụm MAI (phải)
+        if tomorrow_pct < 0:
+            mai_s = f"−{abs(tomorrow_pct)}%"
+            mbw = max(124, round(d.textlength(mai_s, font=f_kneg) + 28))
+            d.rounded_rectangle([rx1 - mbw, y + 8, rx1, y + 64], radius=12, outline=BLACK, width=3)
+            d.text((rx1 - mbw / 2, y + 36), mai_s, font=f_kneg, fill=BLACK, anchor="mm")
+            d.text((rx1 - mbw - 12, kpi_cy + 4), "MAI", font=f_klbl, fill=DARK, anchor="rm")
+        else:
+            mai_s = f"{tomorrow_pct}%"
+            mw = d.textlength(mai_s, font=f_kbig)
+            d.text((rx1, kpi_cy), mai_s, font=f_kbig, fill=BLACK, anchor="rm")
+            d.text((rx1 - mw - 12, kpi_cy + 4), "MAI", font=f_klbl, fill=DARK, anchor="rm")
+
+        # Nhãn mốc ngày Nk/7 cạnh cột cờ (không đè người que ở cả 2 trạng thái)
+        f_day = font("Bold", 19)
+        flag_abs_x = MARGIN + 668
+        if today_pct >= 0:
+            d.text((flag_abs_x + 14, y + 124), f"N{day_index}/7", font=f_day, fill=DARK, anchor="lm")
+        else:
+            d.text((flag_abs_x - 12, y + 124), f"N{day_index}/7", font=f_day, fill=DARK, anchor="rm")
+    else:
+        d.text((rx0, y + 78), "Chưa có hạn mức tuần Gemini", font=font("Medium", 24), fill=MID, anchor="lm")
+
+    return y + box_h + 6
 
 
 def _pct_text(d, x, y, pct, fp):

@@ -47,13 +47,13 @@ $RootEscaped = $PSScriptRoot.Replace('"', '""')
 $VbsContent = @"
 Set WshShell = CreateObject("WScript.Shell")
 WshShell.CurrentDirectory = "$RootEscaped"
-WshShell.Run """$PythonExeEscaped"" ""$ScriptPathEscaped""", 0, True
+WshShell.Run """$PythonExeEscaped"" ""$ScriptPathEscaped"" --spawn-hidden", 0, True
 "@
 [System.IO.File]::WriteAllText($VbsPath, $VbsContent, [System.Text.Encoding]::ASCII)
 
 $Action = New-ScheduledTaskAction `
-    -Execute "wscript.exe" `
-    -Argument "//B //NoLogo `"$VbsPath`"" `
+    -Execute $PythonCmd.Source `
+    -Argument "`"$ScriptPath`" --spawn-hidden" `
     -WorkingDirectory $PSScriptRoot
 
 $Trigger = New-ScheduledTaskTrigger `
@@ -63,6 +63,7 @@ $Trigger = New-ScheduledTaskTrigger `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $Settings = New-ScheduledTaskSettingsSet `
+    -Hidden `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `

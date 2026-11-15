@@ -262,15 +262,11 @@ def _map_agy_bucket_key(bucket_id: str, window: str, group_name: str) -> str | N
         return "five_hour"
     if bid == "gemini-weekly" or ("gemini" in gname and win == "weekly"):
         return "gemini"
-    if bid == "3p-5h" or (("claude" in gname or "gpt" in gname) and win == "5h"):
-        return "seven_day"
-    if bid == "3p-weekly" or (("claude" in gname or "gpt" in gname) and win == "weekly"):
-        return "claude"
     return None
 
 
 def collect_agy_cli_quotas(now: datetime | None = None) -> tuple[dict, dict | None]:
-    """Lấy quota 5 giờ / tuần và credits từ agy.exe -p '/usage' & '/credits'."""
+    """Lấy quota 5 giờ / tuần của Gemini từ agy.exe -p '/usage' (tùy chọn '/credits' qua DASH_FETCH_CREDITS=1)."""
     agy_exe = _find_agy_cli()
     if not agy_exe:
         return {}, None
@@ -300,12 +296,13 @@ def collect_agy_cli_quotas(now: datetime | None = None) -> tuple[dict, dict | No
                         "resets_at": b.get("reset_time") or None,
                     }
 
-    credits_data = _run_agy_slash(agy_exe, "/credits")
-    if isinstance(credits_data, dict) and isinstance(credits_data.get("remaining_credits"), (int, float)):
-        credits_obj = {
-            "remaining": int(round(credits_data["remaining_credits"])),
-            "limit": None,
-        }
+    if os.environ.get("DASH_FETCH_CREDITS", "0").strip() in ("1", "true", "yes"):
+        credits_data = _run_agy_slash(agy_exe, "/credits")
+        if isinstance(credits_data, dict) and isinstance(credits_data.get("remaining_credits"), (int, float)):
+            credits_obj = {
+                "remaining": int(round(credits_data["remaining_credits"])),
+                "limit": None,
+            }
 
     if quotas:
         cache_payload = {
@@ -490,20 +487,120 @@ def trigger_github_workflow() -> str:
         return f"err({type(exc).__name__})"
 
 
+def _respawn_on_hidden_desktop(forward_args: list[str]) -> int | None:
+    """Chạy toàn bộ cây tiến trình con trên một Win32 Desktop ẩn (KindleDashHidden).
+
+    Nhờ đó kể cả khi agy.exe tự gọi MCP servers / git.exe không có CREATE_NO_WINDOW,
+    mọi cửa sổ console phát sinh đều nằm trên desktop ẩn, tuyệt đối không nháy trên màn hình làm việc.
+    Trả về mã thoát của tiến trình con, hoặc None nếu cần fallback chạy trực tiếp.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        GENERIC_ALL = 0x10000000
+        CREATE_NO_WINDOW = 0x08000000
+        STARTF_USESHOWWINDOW = 0x00000001
+
+        class STARTUPINFOW(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.POINTER(wintypes.BYTE)),
+                ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("hProcess", wintypes.HANDLE),
+                ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        hdesk = ctypes.windll.user32.CreateDesktopW("KindleDashHidden", None, None, 0, GENERIC_ALL, None)
+        if not hdesk:
+            return None
+
+        py_exe = Path(sys.executable)
+        if py_exe.name.lower() == "pythonw.exe":
+            console_py = py_exe.with_name("python.exe")
+            if console_py.is_file():
+                py_exe = console_py
+
+        cmd_line = subprocess.list2cmdline([str(py_exe), str(Path(__file__).resolve()), *forward_args])
+        si = STARTUPINFOW()
+        si.cb = ctypes.sizeof(STARTUPINFOW)
+        si.lpDesktop = "KindleDashHidden"
+        si.dwFlags = STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        pi = PROCESS_INFORMATION()
+
+        cwd_str = str(Path(__file__).resolve().parent)
+        ok = ctypes.windll.kernel32.CreateProcessW(
+            None,
+            ctypes.create_unicode_buffer(cmd_line),
+            None,
+            None,
+            False,
+            CREATE_NO_WINDOW,
+            None,
+            cwd_str,
+            ctypes.byref(si),
+            ctypes.byref(pi),
+        )
+        if not ok:
+            ctypes.windll.user32.CloseDesktop(hdesk)
+            return None
+
+        ctypes.windll.kernel32.WaitForSingleObject(pi.hProcess, 90000)
+        exit_code = wintypes.DWORD(0)
+        ctypes.windll.kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(pi.hProcess)
+        ctypes.windll.kernel32.CloseHandle(pi.hThread)
+        ctypes.windll.user32.CloseDesktop(hdesk)
+        return int(exit_code.value)
+    except Exception:
+        return None
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Đồng bộ trạng thái Antigravity lên Kindle Dashboard")
     ap.add_argument("--dry-run", action="store_true", help="In JSON ra màn hình, không gửi lên Apps Script")
     ap.add_argument("--write-local", help="Ghi JSON ra file cục bộ để kiểm thử render.py")
     ap.add_argument("--redact-titles", action="store_true", help="Ẩn tên yêu cầu người dùng, chỉ hiện mã phiên")
     ap.add_argument("--no-trigger-gh", action="store_true", help="Không gọi gh workflow run sau khi gửi Apps Script")
+    ap.add_argument("--spawn-hidden", action="store_true", help="Cô lập toàn bộ tiến trình con trên Win32 Hidden Desktop")
     ap.add_argument(
         "--set-quota",
         nargs="+",
         metavar="KEY=VAL",
-        help="Cập nhật nhanh file ~/.kindle-dashboard-quota.json (vd: gemini=32 claude=58 gpt=15 credits=420)",
+        help="Cập nhật nhanh file ~/.kindle-dashboard-quota.json (vd: gemini=32 five_hour=15)",
     )
     ap.add_argument("--reset-hours", type=float, default=None, help="Đặt thời điểm reset sau N giờ cho --set-quota")
     args = ap.parse_args()
+
+    if args.spawn_hidden:
+        forwarded = [a for a in sys.argv[1:] if a != "--spawn-hidden"]
+        rc = _respawn_on_hidden_desktop(forwarded)
+        if rc is not None:
+            return rc
 
     if args.set_quota:
         save_manual_quota(args.set_quota, args.reset_hours)
