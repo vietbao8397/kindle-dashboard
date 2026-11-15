@@ -39,9 +39,21 @@ if (-not $PythonCmd) {
     exit 1
 }
 
+$VbsPath = Join-Path $PSScriptRoot "launch_sync_hidden.vbs"
+$PythonExeEscaped = $PythonCmd.Source.Replace('"', '""')
+$ScriptPathEscaped = $ScriptPath.Replace('"', '""')
+$RootEscaped = $PSScriptRoot.Replace('"', '""')
+
+$VbsContent = @"
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.CurrentDirectory = "$RootEscaped"
+WshShell.Run """$PythonExeEscaped"" ""$ScriptPathEscaped""", 0, True
+"@
+[System.IO.File]::WriteAllText($VbsPath, $VbsContent, [System.Text.Encoding]::ASCII)
+
 $Action = New-ScheduledTaskAction `
-    -Execute $PythonCmd.Source `
-    -Argument "`"$ScriptPath`"" `
+    -Execute "wscript.exe" `
+    -Argument "//B //NoLogo `"$VbsPath`"" `
     -WorkingDirectory $PSScriptRoot
 
 $Trigger = New-ScheduledTaskTrigger `

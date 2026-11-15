@@ -218,10 +218,23 @@ def _find_agy_cli() -> Path | None:
     return None
 
 
+def _hidden_subprocess_run(cmd: list[str] | str, **kwargs) -> subprocess.CompletedProcess:
+    """Chạy tiến trình con ẩn hoàn toàn, không tạo cửa sổ console ngay cả trên Windows 11."""
+    if sys.platform == "win32":
+        startupinfo = kwargs.pop("startupinfo", None)
+        if startupinfo is None:
+            startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0  # SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    return subprocess.run(cmd, **kwargs)
+
+
 def _run_agy_slash(agy_exe: Path, slash_cmd: str) -> dict | None:
     """Gọi lệnh slash không tương tác của agy.exe, không bật cửa sổ console và bỏ qua hooks."""
     try:
-        proc = subprocess.run(
+        proc = _hidden_subprocess_run(
             [str(agy_exe), "--settings", "{}", "-p", slash_cmd, "--output-format", "json", "--print-timeout", "15s"],
             capture_output=True,
             text=True,
@@ -229,7 +242,6 @@ def _run_agy_slash(agy_exe: Path, slash_cmd: str) -> dict | None:
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return None
@@ -316,7 +328,7 @@ def collect_quotas(now: datetime | None = None) -> tuple[dict, dict | None]:
     cmd = os.environ.get("AGY_QUOTA_CMD", "").strip()
     if cmd:
         try:
-            proc = subprocess.run(
+            proc = _hidden_subprocess_run(
                 cmd,
                 shell=True,
                 capture_output=True,
@@ -325,7 +337,6 @@ def collect_quotas(now: datetime | None = None) -> tuple[dict, dict | None]:
                 errors="replace",
                 stdin=subprocess.DEVNULL,
                 timeout=15,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 parsed = json.loads(proc.stdout)
@@ -461,7 +472,7 @@ def trigger_github_workflow() -> str:
     if not repo_slug:
         return "no_repo"
     try:
-        proc = subprocess.run(
+        proc = _hidden_subprocess_run(
             [gh_exe, "workflow", "run", "update.yml", "-R", repo_slug],
             capture_output=True,
             text=True,
@@ -469,7 +480,6 @@ def trigger_github_workflow() -> str:
             errors="replace",
             stdin=subprocess.DEVNULL,
             timeout=20,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if proc.returncode == 0:
             return "ok"
