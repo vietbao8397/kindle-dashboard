@@ -286,6 +286,7 @@ def compute_daily_pacer(gemini_quota: dict | None, now: datetime) -> dict | None
 
     today_raw = 100.0 * day_index - 7.0 * used
     today_pct = int(round(today_raw))
+    today_used_pct = max(0, 100 - today_pct)
     if day_index >= 7:
         tomorrow_pct = 100
     else:
@@ -295,6 +296,7 @@ def compute_daily_pacer(gemini_quota: dict | None, now: datetime) -> dict | None
     return {
         "day_index": day_index,
         "today_pct": today_pct,
+        "today_used_pct": today_used_pct,
         "tomorrow_pct": tomorrow_pct,
         "reset_day_short": reset_day_short,
     }
@@ -679,17 +681,18 @@ def draw_antigravity(d: ScaledDraw, y: int, agy: dict, now: datetime) -> int:
         f_kneg = font("Bold", 44)
         kpi_cy = y + 36
 
-        # Cụm NAY (trái)
+        # Cụm NAY (trái): hiển thị % đã sử dụng hôm nay (vượt > 100% bật nhãn đen cảnh báo)
+        today_used_pct = pacer["today_used_pct"]
         d.text((rx0, kpi_cy + 4), "NAY", font=f_klbl, fill=BLACK if today_pct < 0 else DARK, anchor="lm")
         nay_w = d.textlength("NAY", font=f_klbl)
         if today_pct < 0:
-            neg_s = f"−{abs(today_pct)}%"
-            bw = max(134, round(d.textlength(neg_s, font=f_kneg) + 30))
+            over_s = f"{today_used_pct}%"
+            bw = max(134, round(d.textlength(over_s, font=f_kneg) + 30))
             bx0 = rx0 + nay_w + 12
             d.rounded_rectangle([bx0, y + 8, bx0 + bw, y + 64], radius=12, fill=BLACK)
-            d.text((bx0 + bw / 2, y + 36), neg_s, font=f_kneg, fill=WHITE, anchor="mm")
+            d.text((bx0 + bw / 2, y + 36), over_s, font=f_kneg, fill=WHITE, anchor="mm")
         else:
-            pos_s = f"{today_pct}%"
+            pos_s = f"{today_used_pct}%"
             d.text((rx0 + nay_w + 12, kpi_cy), pos_s, font=f_kbig, fill=BLACK, anchor="lm")
 
         # Cụm MAI (phải)

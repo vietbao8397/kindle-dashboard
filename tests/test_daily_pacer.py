@@ -24,25 +24,38 @@ class TestDailyPacerMath(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertEqual(res["day_index"], 2)
         self.assertEqual(res["today_pct"], 18)
+        self.assertEqual(res["today_used_pct"], 82)
         self.assertEqual(res["tomorrow_pct"], 118)
         self.assertEqual(res["reset_day_short"], "T7")
 
+    def test_monday_photo_used_27_tomorrow_173(self):
+        # Mon 16/11 08:45+07:00 -> Day 3 of 7, used 32.4% -> rem=73%, used_today=27%, tomorrow=173%
+        now = datetime(2026, 11, 16, 8, 45, tzinfo=TZ)
+        q = {"utilization": 32.4, "resets_at": "2026-11-20T23:44:21Z"}
+        res = render.compute_daily_pacer(q, now)
+        self.assertEqual(res["day_index"], 3)
+        self.assertEqual(res["today_pct"], 73)
+        self.assertEqual(res["today_used_pct"], 27)
+        self.assertEqual(res["tomorrow_pct"], 173)
+
     def test_deficit_subtracts_from_tomorrow(self):
-        # Day 2 of 7, used 32.3% -> 200 - 226.1 = -26%, tomorrow = 100 - 26 = 74%
+        # Day 2 of 7, used 32.3% -> 200 - 226.1 = -26%, used_today = 126%, tomorrow = 74%
         now = datetime(2026, 11, 15, 21, 30, tzinfo=TZ)
         q = {"utilization": 32.3, "resets_at": "2026-11-20T23:44:21Z"}
         res = render.compute_daily_pacer(q, now)
         self.assertEqual(res["day_index"], 2)
         self.assertEqual(res["today_pct"], -26)
+        self.assertEqual(res["today_used_pct"], 126)
         self.assertEqual(res["tomorrow_pct"], 74)
 
     def test_deep_deficit_makes_tomorrow_negative_too(self):
-        # Day 1 of 7, used 30.0% -> 100 - 210 = -110%, tomorrow = 200 - 210 = -10%
+        # Day 1 of 7, used 30.0% -> 100 - 210 = -110%, used_today = 210%, tomorrow = -10%
         now = datetime(2026, 11, 14, 15, 0, tzinfo=TZ)
         q = {"utilization": 30.0, "resets_at": "2026-11-20T23:44:21Z"}
         res = render.compute_daily_pacer(q, now)
         self.assertEqual(res["day_index"], 1)
         self.assertEqual(res["today_pct"], -110)
+        self.assertEqual(res["today_used_pct"], 210)
         self.assertEqual(res["tomorrow_pct"], -10)
 
     def test_cycle_day_7_tomorrow_resets_to_100(self):
@@ -52,6 +65,7 @@ class TestDailyPacerMath(unittest.TestCase):
         res = render.compute_daily_pacer(q, now)
         self.assertEqual(res["day_index"], 7)
         self.assertEqual(res["today_pct"], 70)
+        self.assertEqual(res["today_used_pct"], 30)
         self.assertEqual(res["tomorrow_pct"], 100)
 
     def test_stale_post_reset_clamps_to_day_7(self):
@@ -61,6 +75,7 @@ class TestDailyPacerMath(unittest.TestCase):
         res = render.compute_daily_pacer(q, now)
         self.assertEqual(res["day_index"], 7)
         self.assertEqual(res["today_pct"], 105)
+        self.assertEqual(res["today_used_pct"], 0)
         self.assertEqual(res["tomorrow_pct"], 100)
 
     def test_evening_reset_steps_across_7_days(self):
